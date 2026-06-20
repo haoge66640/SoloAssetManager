@@ -261,43 +261,18 @@ async function permanentDeleteCurrentAsset() {
   message.success(t('fileDeleted'))
 }
 
-// ---- Rename helpers ----
-const isEditingName = ref(false)
-const editingNameValue = ref('')
-const nameInputRef = ref<HTMLInputElement | null>(null)
-
-function getNameWithoutExt(name: string) {
-  const dot = name.lastIndexOf('.')
-  return dot > 0 ? name.substring(0, dot) : name
-}
-
+// ---- Random rename ----
 function getExtension(name: string) {
   const dot = name.lastIndexOf('.')
   return dot > 0 ? name.substring(dot) : ''
 }
 
-function startEditing() {
+async function randomRename() {
   if (!selectedAsset.value) return
-  editingNameValue.value = getNameWithoutExt(selectedAsset.value.name)
-  isEditingName.value = true
-  nextTick(() => {
-    nameInputRef.value?.focus()
-    nameInputRef.value?.select()
-  })
-}
-
-function cancelRename() {
-  isEditingName.value = false
-  editingNameValue.value = ''
-}
-
-async function confirmRename() {
-  if (!selectedAsset.value || !isEditingName.value) return
-  isEditingName.value = false
-  const trimmed = editingNameValue.value.trim()
-  if (!trimmed || trimmed === getNameWithoutExt(selectedAsset.value.name)) return
   const ext = getExtension(selectedAsset.value.name)
-  await store.renameAssetById(selectedAsset.value.id, `${trimmed}${ext}`)
+  const newName = `${String(Math.floor(100000 + Math.random() * 900000))}${ext}`
+  if (newName === selectedAsset.value.name) return
+  await store.renameAssetById(selectedAsset.value.id, newName)
   message.success(t('renamed'))
 }
 
@@ -588,27 +563,13 @@ onMounted(async () => {
               />
             </div>
 
-            <div
-              class="detail-title"
-              :class="{ 'is-editing': isEditingName }"
-              @click="isEditingName ? null : startEditing()"
-            >
-              <span v-if="!isEditingName" class="display-name">
+            <div class="detail-title" title="点击随机重命名" @click="randomRename">
+              <span class="display-name">
                 {{ selectedAsset.name }}
-                <svg class="edit-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                <svg class="shuffle-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
                 </svg>
               </span>
-              <input
-                v-else
-                ref="nameInputRef"
-                v-model="editingNameValue"
-                class="rename-input"
-                @click.stop
-                @keydown.enter="confirmRename"
-                @keydown.escape="cancelRename"
-                @blur="confirmRename"
-              />
             </div>
             <section class="property-panel">
               <h3>{{ t('properties') }}</h3>
@@ -1087,63 +1048,37 @@ onMounted(async () => {
   overflow-wrap: anywhere;
   white-space: normal;
   cursor: pointer;
-  transition: background 0.15s;
-  border-radius: 6px;
-  padding: 6px 8px;
-  margin-left: -8px;
-  margin-right: -8px;
+  transition: background 0.15s, box-shadow 0.15s;
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-left: -10px;
+  margin-right: -10px;
   position: relative;
 }
 
 .detail-title:hover {
-  background: #f1f5f9;
-}
-
-.detail-title.is-editing {
-  cursor: default;
-  background: transparent;
-  padding: 6px 0;
-  margin-left: 0;
-  margin-right: 0;
+  background: #f0f4ff;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
 }
 
 .display-name {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
-.edit-icon {
+.shuffle-icon {
   flex-shrink: 0;
-  color: #94a3b8;
-  opacity: 0;
-  transition: opacity 0.15s;
+  color: #93c5fd;
+  transition: color 0.2s, transform 0.2s;
 }
 
-.detail-title:hover .edit-icon {
-  opacity: 1;
+.detail-title:hover .shuffle-icon {
+  color: #2563eb;
 }
 
-.rename-input {
-  width: 100%;
-  box-sizing: border-box;
-  border: 2px solid #2563eb;
-  border-radius: 8px;
-  background: #fff;
-  color: #111827;
-  font-size: inherit;
-  font-weight: 700;
-  font-family: inherit;
-  line-height: 1.5;
-  padding: 8px 12px;
-  outline: none;
-  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
-  transition: box-shadow 0.2s, border-color 0.2s;
-}
-
-.rename-input:focus {
-  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.22);
-  border-color: #1d4ed8;
+.detail-title:active .shuffle-icon {
+  transform: rotate(180deg);
 }
 
 .property-panel {
