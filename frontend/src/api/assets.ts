@@ -85,11 +85,42 @@ export async function permanentDeleteAsset(assetId: string) {
   return response.data
 }
 
+export async function formatAsset(assetId: string) {
+  const response = await api.post<Asset>('/assets/format', { asset_id: assetId })
+  return response.data
+}
+
 export async function getAudioInfo(assetId: string) {
   const response = await api.get<{ duration: number; sampleRate: number; channels: number }>(`/assets/audio-info/${assetId}`)
   return response.data
 }
 
+export async function getWaveform(assetId: string, count?: number) {
+  const params = count ? { count } : {}
+  const response = await api.get<{ peaks: number[] }>(`/assets/waveform/${assetId}`, { params })
+  return response.data
+}
+
 export function assetFileUrl(assetId: string) {
   return `${api.defaults.baseURL}/assets/file/${assetId}`
+}
+
+export async function getCategoryPaths(area: 'project' | 'library') {
+  const response = await api.get<Record<string, Record<string, string>>>('/categories/paths', { params: { area } })
+  return response.data
+}
+
+export async function setCategoryPath(area: 'project' | 'library', type: AssetType, name: string, targetPath: string) {
+  const response = await api.post<{ ok: boolean }>('/categories/path', { area, type, name, target_path: targetPath })
+  return response.data
+}
+
+export async function deleteCategoryFromDisk(area: 'project' | 'library', type: AssetType, name: string) {
+  const response = await api.delete<{ ok: boolean }>('/categories', { data: { area, type, name } })
+  return response.data
+}
+
+export async function copyAssetToTarget(assetId: string) {
+  const response = await api.post<{ ok: boolean; target?: string }>(`/assets/copy-to-target/${assetId}`)
+  return response.data
 }

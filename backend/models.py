@@ -67,8 +67,25 @@ class DeleteAssetRequest(BaseModel):
     asset_id: str
 
 
+class FormatAssetRequest(BaseModel):
+    asset_id: str
+
+
 class AssetQuery(BaseModel):
     area: AssetArea | None = None
     type: AssetType | None = None
     category: str = ""
     keyword: str = ""
+
+
+class CategoryPathRequest(BaseModel):
+    area: TargetArea
+    type: AssetType
+    name: str
+    target_path: str = ""
+
+
+class DeleteCategoryRequest(BaseModel):
+    area: TargetArea
+    type: AssetType
+    name: str

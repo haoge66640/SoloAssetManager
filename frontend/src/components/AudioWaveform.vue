@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { getAudioInfo } from '@/api/assets'
+import { getAudioInfo, getWaveform } from '@/api/assets'
 
 let activeAudio: HTMLAudioElement | null = null
 let activeAudioToken: symbol | null = null
@@ -17,189 +17,106 @@ const emit = defineEmits<{
 }>()
 
 const canvas = ref<HTMLCanvasElement>()
+const canvasContainer = ref<HTMLDivElement>()
 const audio = ref<HTMLAudioElement>()
 const isPlaying = ref(false)
 const isLoading = ref(true)
 const isPlayable = ref(false)
 const instanceToken = Symbol('audio-waveform')
-let audioContext: AudioContext | null = null
 let loadVersion = 0
+let resizeObserver: ResizeObserver | null = null
+const loadedPeaks = ref<number[]>([])
 
-function readUint32LE(data: Uint8Array, offset: number) {
-  return (
-    (data[offset] ?? 0) |
-    ((data[offset + 1] ?? 0) << 8) |
-    ((data[offset + 2] ?? 0) << 16) |
-    ((data[offset + 3] ?? 0) << 24)
-  )
-}
-
-function readUint16LE(data: Uint8Array, offset: number) {
-  return (data[offset] ?? 0) | ((data[offset + 1] ?? 0) << 8)
-}
-
-function readGranule(data: Uint8Array, offset: number) {
-  let value = 0n
-  for (let index = 7; index >= 0; index -= 1) {
-    value = (value << 8n) + BigInt(data[offset + index] ?? 0)
+function getCanvasWidth(): number {
+  const container = canvasContainer.value
+  if (container) {
+    return container.clientWidth || (props.compact ? 148 : 228)
   }
-  return value === 0xffffffffffffffffn ? -1 : Number(value)
+  return props.compact ? 148 : 228
 }
 
-function matchText(data: Uint8Array, offset: number, text: string) {
-  for (let index = 0; index < text.length; index += 1) {
-    if (data[offset + index] !== text.charCodeAt(index)) return false
+function computeBarCount(width: number): number {
+  if (props.compact) {
+    return Math.max(80, Math.min(500, Math.round(width * 0.6)))
   }
-  return true
+  return Math.max(120, Math.min(1500, Math.round(width * 0.85)))
 }
 
-function parseWavMetadata(bytes: ArrayBuffer) {
-  const data = new Uint8Array(bytes)
-  if (!matchText(data, 0, 'RIFF') || !matchText(data, 8, 'WAVE')) return null
-
-  let offset = 12
-  let sampleRate = 0
-  let byteRate = 0
-  let dataSize = 0
-
-  while (offset + 8 <= data.length) {
-    const chunkId = String.fromCharCode(...data.slice(offset, offset + 4))
-    const chunkSize = readUint32LE(data, offset + 4)
-    const chunkDataOffset = offset + 8
-
-    if (chunkId === 'fmt ') {
-      sampleRate = readUint32LE(data, chunkDataOffset + 4)
-      byteRate = readUint32LE(data, chunkDataOffset + 8)
-    }
-    if (chunkId === 'data') {
-      dataSize = chunkSize
-    }
-
-    offset = chunkDataOffset + chunkSize + (chunkSize % 2)
-  }
-
-  if (!sampleRate || !byteRate || !dataSize) return null
-  return { duration: dataSize / byteRate, sampleRate }
-}
-
-function parseOggMetadata(bytes: ArrayBuffer) {
-  const data = new Uint8Array(bytes)
-  let sampleRate = 0
-  let opusPreSkip = 0
-  let isOpus = false
-  let lastGranule = -1
-
-  for (let index = 0; index + 16 < data.length; index += 1) {
-    if (data[index] === 1 && matchText(data, index + 1, 'vorbis')) {
-      sampleRate = readUint32LE(data, index + 12)
-      break
-    }
-    if (matchText(data, index, 'OpusHead')) {
-      isOpus = true
-      opusPreSkip = readUint16LE(data, index + 10)
-      sampleRate = readUint32LE(data, index + 12)
-      break
-    }
-  }
-
-  let offset = 0
-  while (offset + 27 <= data.length) {
-    if (!matchText(data, offset, 'OggS')) {
-      offset += 1
-      continue
-    }
-
-    const granule = readGranule(data, offset + 6)
-    if (granule >= 0) {
-      lastGranule = granule
-    }
-
-    const segmentCount = data[offset + 26] ?? 0
-    let bodySize = 0
-    for (let index = 0; index < segmentCount; index += 1) {
-      bodySize += data[offset + 27 + index] ?? 0
-    }
-    offset += 27 + segmentCount + bodySize
-  }
-
-  if (!sampleRate || lastGranule < 0) return null
-
-  if (isOpus) {
-    return {
-      duration: Math.max(0, (lastGranule - opusPreSkip) / 48000),
-      sampleRate: sampleRate || 48000,
-    }
-  }
-
-  return { duration: lastGranule / sampleRate, sampleRate }
-}
-
-function parseAudioMetadata(bytes: ArrayBuffer) {
-  return parseWavMetadata(bytes) ?? parseOggMetadata(bytes)
-}
-
-function drawBars(peaks: number[]) {
+function drawFilledWaveform(peaks: number[]) {
   const target = canvas.value
-  if (!target) return
+  if (!target || peaks.length === 0) return
 
-  const width = target.getBoundingClientRect().width || (props.compact ? 148 : 228)
+  const width = getCanvasWidth()
   const height = props.compact ? 96 : 180
   const ratio = window.devicePixelRatio || 1
-  const context = target.getContext('2d')
-  if (!context) return
+  const ctx = target.getContext('2d')
+  if (!ctx) return
 
   target.width = width * ratio
   target.height = height * ratio
   target.style.height = `${height}px`
 
-  context.setTransform(ratio, 0, 0, ratio, 0, 0)
-  context.clearRect(0, 0, width, height)
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
+  ctx.clearRect(0, 0, width, height)
 
   const center = height / 2
-  const gap = props.compact ? 3 : 4
-  const barCount = peaks.length
-  const barWidth = Math.max(2, width / barCount - gap)
+  const halfH = height * 0.42 // 84% of half height
+  const len = peaks.length
 
-  context.lineCap = 'round'
-  context.strokeStyle = '#8b8cf6'
-  context.lineWidth = barWidth
+  // Draw main filled waveform envelope
+  ctx.beginPath()
+  ctx.moveTo(0, height)
 
-  for (let index = 0; index < barCount; index += 1) {
-    const peak = peaks[index] ?? 0
-    const barHeight = Math.max(6, peak * height * 0.86)
-    const x = index * (barWidth + gap) + barWidth / 2
-    context.beginPath()
-    context.moveTo(x, center - barHeight / 2)
-    context.lineTo(x, center + barHeight / 2)
-    context.stroke()
-  }
-}
-
-function drawWave(data: Float32Array) {
-  const barCount = props.compact ? 52 : 88
-  const step = Math.max(1, Math.floor(data.length / barCount))
-  const peaks = []
-
-  for (let index = 0; index < barCount; index += 1) {
-    let peak = 0
-    const start = index * step
-    const end = Math.min(start + step, data.length)
-    for (let cursor = start; cursor < end; cursor += 1) {
-      peak = Math.max(peak, Math.abs(data[cursor] ?? 0))
-    }
-    peaks.push(peak)
+  // Top envelope (left to right)
+  for (let i = 0; i < len; i++) {
+    const x = (i / Math.max(1, len - 1)) * width
+    const y = center - peaks[i] * halfH
+    ctx.lineTo(x, y)
   }
 
-  drawBars(peaks)
+  // Bottom envelope (right to left)
+  for (let i = len - 1; i >= 0; i--) {
+    const x = (i / Math.max(1, len - 1)) * width
+    const y = center + peaks[i] * halfH
+    ctx.lineTo(x, y)
+  }
+
+  ctx.closePath()
+
+  // Gradient fill
+  const gradient = ctx.createLinearGradient(0, 0, 0, height)
+  gradient.addColorStop(0, '#818cf8')   // indigo-400
+  gradient.addColorStop(0.3, '#6366f1') // indigo-500
+  gradient.addColorStop(0.7, '#6366f1') // indigo-500
+  gradient.addColorStop(1, '#818cf8')   // indigo-400
+
+  ctx.fillStyle = gradient
+  ctx.fill()
+
+  // Subtle center line
+  ctx.beginPath()
+  ctx.moveTo(0, center)
+  ctx.lineTo(width, center)
+  ctx.strokeStyle = 'rgba(99, 102, 241, 0.15)'
+  ctx.lineWidth = 1
+  ctx.stroke()
 }
 
 function drawPlaceholder() {
-  const barCount = props.compact ? 52 : 88
+  const width = getCanvasWidth()
+  const barCount = computeBarCount(width)
   const peaks = Array.from({ length: barCount }, (_, index) => {
     const progress = index / Math.max(1, barCount - 1)
     return 0.12 + Math.sin(progress * Math.PI) * 0.34
   })
-  drawBars(peaks)
+  loadedPeaks.value = peaks
+  drawFilledWaveform(peaks)
+}
+
+function handleResize() {
+  if (loadedPeaks.value.length > 0) {
+    drawFilledWaveform(loadedPeaks.value)
+  }
 }
 
 async function loadWaveform() {
@@ -208,6 +125,7 @@ async function loadWaveform() {
   isPlayable.value = false
   isPlaying.value = false
   stopAudio()
+  loadedPeaks.value = []
   drawPlaceholder()
   await new Promise(requestAnimationFrame)
 
@@ -220,24 +138,52 @@ async function loadWaveform() {
           }
         })
         .catch(() => undefined)
+
+      // Fetch waveform peaks from backend with dynamic count
+      try {
+        const width = getCanvasWidth()
+        const barCount = computeBarCount(width)
+        const { peaks } = await getWaveform(props.assetId, barCount)
+        if (currentVersion === loadVersion) {
+          loadedPeaks.value = peaks
+          drawFilledWaveform(peaks)
+          isLoading.value = false
+          return
+        }
+      } catch {
+        // fallback: try browser decode
+      }
     }
 
+    // Fallback: decode audio in browser
     const response = await fetch(props.src)
     const bytes = await response.arrayBuffer()
-    const metadata = parseAudioMetadata(bytes)
-    if (metadata && currentVersion === loadVersion && !props.assetId) {
-      emit('metadata', metadata)
-    }
-    audioContext ??= new AudioContext()
+    const audioContext = new AudioContext()
     const audioBuffer = await audioContext.decodeAudioData(bytes.slice(0))
+    audioContext.close()
     if (currentVersion === loadVersion) {
-      if (!metadata) {
+      if (!props.assetId) {
         emit('metadata', {
           duration: audioBuffer.duration,
           sampleRate: audioBuffer.sampleRate,
         })
       }
-      drawWave(audioBuffer.getChannelData(0))
+      const data = audioBuffer.getChannelData(0)
+      const width = getCanvasWidth()
+      const barCount = computeBarCount(width)
+      const step = Math.max(1, Math.floor(data.length / barCount))
+      const peaks: number[] = []
+      for (let index = 0; index < barCount; index += 1) {
+        let peak = 0
+        const start = index * step
+        const end = Math.min(start + step, data.length)
+        for (let cursor = start; cursor < end; cursor += 1) {
+          peak = Math.max(peak, Math.abs(data[cursor] ?? 0))
+        }
+        peaks.push(peak)
+      }
+      loadedPeaks.value = peaks
+      drawFilledWaveform(peaks)
       isLoading.value = false
     }
   } catch {
@@ -343,10 +289,18 @@ onMounted(() => {
   if (audio.value) {
     audio.value.volume = props.volume
   }
+  resizeObserver = new ResizeObserver(() => {
+    handleResize()
+  })
+  if (canvasContainer.value) {
+    resizeObserver.observe(canvasContainer.value)
+  }
   loadWaveform()
 })
 onBeforeUnmount(() => {
   window.removeEventListener('solo-audio-play', stopOtherAudio)
+  resizeObserver?.disconnect()
+  resizeObserver = null
   stopAudio()
 })
 </script>
@@ -358,7 +312,9 @@ onBeforeUnmount(() => {
       <span v-else-if="!isPlaying" class="play-icon"></span>
       <span v-else class="pause-icon"></span>
     </button>
-    <canvas ref="canvas"></canvas>
+    <div ref="canvasContainer" class="canvas-wrap">
+      <canvas ref="canvas"></canvas>
+    </div>
     <audio
       ref="audio"
       preload="auto"
@@ -389,6 +345,11 @@ onBeforeUnmount(() => {
   gap: 10px;
   min-height: 112px;
   padding: 12px;
+}
+
+.canvas-wrap {
+  width: 100%;
+  overflow: hidden;
 }
 
 .play-dot {
@@ -464,6 +425,7 @@ onBeforeUnmount(() => {
 }
 
 canvas {
+  display: block;
   width: 100%;
 }
 

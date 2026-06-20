@@ -4,6 +4,7 @@ import {
   createCategory,
   createProject,
   deleteAsset,
+  formatAsset,
   getAssets,
   getCategories,
   getProjects,
@@ -116,8 +117,8 @@ export const useAssetStore = defineStore('assets', () => {
 
   async function renameAssetById(assetId: string, newName: string) {
     const updated = await renameAsset(assetId, newName)
-    assets.value = assets.value.map((asset) => (asset.id === updated.id ? updated : asset))
-    // If the selected asset id changed (due to path-based id), update selection
+    // remove old asset (by original id) and add the new one (id may have changed due to path hash)
+    assets.value = [...assets.value.filter((asset) => asset.id !== assetId), updated]
     if (selectedAssetId.value === assetId) {
       selectedAssetId.value = updated.id
     }
@@ -138,6 +139,15 @@ export const useAssetStore = defineStore('assets', () => {
     assets.value = assets.value.filter((asset) => asset.id !== assetId)
     if (selectedAssetId.value === assetId) {
       selectedAssetId.value = assets.value[0]?.id ?? ''
+    }
+  }
+
+  async function formatAssetById(assetId: string) {
+    const updated = await formatAsset(assetId)
+    // remove old asset (by original id) and add the new one (id may have changed)
+    assets.value = [...assets.value.filter((asset) => asset.id !== assetId), updated]
+    if (selectedAssetId.value === assetId) {
+      selectedAssetId.value = updated.id
     }
   }
 
@@ -168,5 +178,6 @@ export const useAssetStore = defineStore('assets', () => {
     renameAssetById,
     deleteAssetById,
     permanentDeleteAssetById,
+    formatAssetById,
   }
 })

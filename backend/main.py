@@ -8,7 +8,10 @@ from .models import (
     AssetQuery,
     AssetUpdateRequest,
     CategoryCreateRequest,
+    CategoryPathRequest,
     DeleteAssetRequest,
+    DeleteCategoryRequest,
+    FormatAssetRequest,
     MoveAssetRequest,
     ProjectCreateRequest,
     RenameAssetRequest,
@@ -16,9 +19,14 @@ from .models import (
 )
 from .storage import (
     audio_info,
+    compute_waveform,
+    copy_asset_to_target,
     create_category,
     create_project,
+    delete_category_from_disk,
     file_path_by_id,
+    format_with_ffmpeg,
+    get_category_paths,
     get_settings,
     init_owner_assets,
     list_categories,
@@ -33,6 +41,7 @@ from .storage import (
     scan_all,
     scan_area,
     scan_pending,
+    set_category_target_path,
     update_asset_meta,
 )
 
@@ -80,6 +89,23 @@ def read_categories(area: str, type: str = "") -> list[str]:
 @app.post("/categories")
 def add_category(request: CategoryCreateRequest) -> dict:
     return create_category(request.area, request.type, request.name)
+
+
+@app.get("/categories/paths")
+def read_category_paths(area: str):
+    """Get category target paths for an area: {type: {category: target_path}}"""
+    return get_category_paths(area)
+
+
+@app.post("/categories/path")
+def update_category_path(request: CategoryPathRequest):
+    set_category_target_path(request.area, request.type, request.name, request.target_path)
+    return {"ok": True}
+
+
+@app.delete("/categories")
+def remove_category(request: DeleteCategoryRequest):
+    return delete_category_from_disk(request.area, request.type, request.name)
 
 
 @app.post("/scan")
@@ -132,6 +158,11 @@ def read_audio_info(asset_id: str):
     return audio_info(asset_id)
 
 
+@app.get("/assets/waveform/{asset_id}")
+def read_waveform(asset_id: str, count: int = 600):
+    return compute_waveform(asset_id, count)
+
+
 @app.post("/assets/rename")
 def rename_asset_endpoint(request: RenameAssetRequest):
     return rename_asset(request.asset_id, request.new_name)
@@ -147,6 +178,16 @@ def permanent_delete_asset_endpoint(request: DeleteAssetRequest):
     return permanent_delete_asset(request.asset_id)
 
 
+@app.post("/assets/format")
+def format_asset_endpoint(request: FormatAssetRequest):
+    return format_with_ffmpeg(request.asset_id)
+
+
 @app.post("/assets/open-folder/{asset_id}")
 def open_asset_folder(asset_id: str):
     return open_folder(asset_id)
+
+
+@app.post("/assets/copy-to-target/{asset_id}")
+def copy_to_target(asset_id: str):
+    return copy_asset_to_target(asset_id)

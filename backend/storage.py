@@ -1,8 +1,10 @@
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
+import struct
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +22,7 @@ INDEX_FILES = {
 TAGS_FILE = DATA_DIR / "tags.json"
 SOURCES_FILE = DATA_DIR / "sources.json"
 HISTORY_FILE = DATA_DIR / "history.json"
+CATEGORY_PATHS_FILE = DATA_DIR / "category_paths.json"
 
 TYPE_DIRS = {
     "image": "图片",
@@ -46,6 +49,8 @@ def ensure_data_files() -> None:
         write_json(SOURCES_FILE, [])
     if not HISTORY_FILE.exists():
         write_json(HISTORY_FILE, [])
+    if not CATEGORY_PATHS_FILE.exists():
+        write_json(CATEGORY_PATHS_FILE, {})
 
 
 def read_json(path: Path, default):
@@ -145,7 +150,49 @@ def list_categories(area: str, asset_type: AssetType) -> list[str]:
 def create_category(area: str, asset_type: AssetType, name: str) -> dict:
     base = current_project_root() if area == "project" else library_root()
     (base / type_dir(asset_type) / name).mkdir(parents=True, exist_ok=True)
+    init_category_paths(area, asset_type, name)
     return {"ok": True}
+
+
+def delete_category_from_disk(area: str, asset_type: AssetType, name: str) -> dict:
+    base = current_project_root() if area == "project" else library_root()
+    target = base / type_dir(asset_type) / name
+    if target.exists() and target.is_dir():
+        shutil.rmtree(target)
+    # Clean up saved target path
+    paths = get_category_paths_raw()
+    (paths.setdefault(area, {}).setdefault(asset_type, {})).pop(name, None)
+    write_json(CATEGORY_PATHS_FILE, paths)
+    return {"ok": True}
+
+
+def init_category_paths(area: str, asset_type: AssetType, name: str) -> None:
+    """Ensure a category entry exists in paths storage, without overwriting."""
+    paths = get_category_paths_raw()
+    area_data = paths.setdefault(area, {})
+    type_data = area_data.setdefault(asset_type, {})
+    if name not in type_data:
+        type_data[name] = ""
+    write_json(CATEGORY_PATHS_FILE, paths)
+
+
+def get_category_paths_raw() -> dict:
+    ensure_data_files()
+    return read_json(CATEGORY_PATHS_FILE, {})
+
+
+def get_category_paths(area: str) -> dict:
+    """Returns {type: {category: target_path}} for the given area."""
+    paths = get_category_paths_raw()
+    return paths.get(area, {})
+
+
+def set_category_target_path(area: str, asset_type: AssetType, name: str, target_path: str) -> None:
+    paths = get_category_paths_raw()
+    area_data = paths.setdefault(area, {})
+    type_data = area_data.setdefault(asset_type, {})
+    type_data[name] = target_path
+    write_json(CATEGORY_PATHS_FILE, paths)
 
 
 def asset_id(path: Path) -> str:
@@ -299,21 +346,20 @@ def update_asset_meta(asset_id_value: str, source_type: str, source_url: str, ta
     raise FileNotFoundError(asset_id_value)
 
 
-def strip_number_suffix(stem: str) -> str:
-    return re.sub(r"_\d+$", "", stem)
-
-
-def next_numbered_name(source: Path) -> str:
-    base_stem = strip_number_suffix(source.stem)
+def next_random_name(source: Path, target_dir: Path | None = None) -> str:
     ext = source.suffix.lower()
-    pattern = re.compile(rf"^{re.escape(base_stem)}_(\d+){re.escape(ext)}$", re.IGNORECASE)
-    max_number = 0
-    for path in owner_root().rglob("*"):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
-            match = pattern.match(path.name)
-            if match:
-                max_number = max(max_number, int(match.group(1)))
-    return f"{base_stem}_{max_number + 1}{ext}"
+    stem = source.stem
+    # If filename already starts with 6 digits, reuse them
+    prefix_match = re.match(r"^\d{6}", stem)
+    prefix = prefix_match.group() if prefix_match else f"{random.randint(100000, 999999)}"
+    name = f"{prefix}{ext}"
+    # Handle collision: regenerate if name exists in target directory
+    attempts = 0
+    while target_dir and (target_dir / name).exists() and attempts < 100:
+        prefix = f"{random.randint(100000, 999999)}"
+        name = f"{prefix}{ext}"
+        attempts += 1
+    return name
 
 
 def move_from_pending(asset_id_value: str, target_area: str, category: str, source_type: str, source_url: str, tags: list[str], note: str) -> Asset:
@@ -324,7 +370,7 @@ def move_from_pending(asset_id_value: str, target_area: str, category: str, sour
     base = current_project_root() if target_area == "project" else library_root()
     target_dir = base / TYPE_DIRS[asset.type] / category
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / next_numbered_name(source)
+    target_path = target_dir / next_random_name(source, target_dir)
     shutil.move(str(source), str(target_path))
     moved = build_asset(target_path, target_area, base)
     moved.source_type = source_type
@@ -344,7 +390,7 @@ def move_to_pending(asset_id_value: str) -> Asset:
     if area == "pending":
         raise ValueError("Asset is already in pending.")
     source = Path(asset.path)
-    target_path = pending_root() / next_numbered_name(source)
+    target_path = pending_root() / next_random_name(source, pending_root())
     target_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source), str(target_path))
     moved = build_asset(target_path, "pending", pending_root(), asset)
@@ -395,6 +441,44 @@ def audio_info(asset_id_value: str) -> dict:
     }
 
 
+_waveform_cache: dict[str, tuple[list[int], int]] = {}
+_WAVEFORM_CACHE_MAX = 100
+
+
+def _get_cached_samples(asset_id_value: str) -> list[int]:
+    """Return cached raw PCM samples for an asset, or decode and cache them."""
+    if asset_id_value in _waveform_cache:
+        return _waveform_cache[asset_id_value][0]
+    path = file_path_by_id(asset_id_value)
+    result = subprocess.run(
+        ["ffmpeg", "-i", str(path), "-f", "s16le", "-ac", "1", "-ar", "8000", "-y", "pipe:1"],
+        capture_output=True, check=True,
+    )
+    raw = result.stdout
+    sample_count = len(raw) // 2
+    samples: list[int] = list(struct.unpack(f"<{sample_count}h", raw[:sample_count * 2]))
+    # Evict oldest if cache is full
+    if len(_waveform_cache) >= _WAVEFORM_CACHE_MAX:
+        oldest = next(iter(_waveform_cache))
+        del _waveform_cache[oldest]
+    _waveform_cache[asset_id_value] = (samples, id(samples))
+    return samples
+
+
+def compute_waveform(asset_id_value: str, count: int = 600) -> dict:
+    count = max(20, min(2000, count))
+    samples = _get_cached_samples(asset_id_value)
+    samples_per_bar = max(1, len(samples) // count)
+    peaks = []
+    for i in range(count):
+        start = i * samples_per_bar
+        end = len(samples) if i == count - 1 else start + samples_per_bar
+        segment = samples[start:end]
+        peak = max(abs(s) for s in segment) / 32768.0 if segment else 0
+        peaks.append(round(peak, 4))
+    return {"peaks": peaks}
+
+
 def rename_asset(asset_id_value: str, new_name: str) -> Asset:
     if not new_name:
         raise ValueError("New name cannot be empty")
@@ -425,6 +509,32 @@ def open_folder(asset_id_value: str) -> dict:
     return {"ok": True}
 
 
+def format_with_ffmpeg(asset_id_value: str) -> Asset:
+    area, asset = find_asset(asset_id_value)
+    source = Path(asset.path)
+    output = source.parent / f"{source.stem}.wav"
+    temp_output = source.parent / f"._fmt_{source.name}.wav"
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(source), "-ar", "44100", "-ac", "1", str(temp_output)],
+        check=True, capture_output=True,
+    )
+    source.unlink(missing_ok=True)
+    output.unlink(missing_ok=True)
+    temp_output.rename(output)
+    base = (
+        pending_root()
+        if area == "pending"
+        else current_project_root() if area == "project" else library_root()
+    )
+    formatted = build_asset(output, area, base, asset)
+    assets = load_assets(area)
+    assets = [a for a in assets if a.id != asset_id_value and a.id != formatted.id]
+    assets.append(formatted)
+    save_assets(area, sorted(assets, key=lambda a: a.path))
+    append_history({"action": "format", "from": asset.path, "to": formatted.path})
+    return formatted
+
+
 def permanent_delete_asset(asset_id_value: str) -> dict:
     _, asset = find_asset(asset_id_value)
     path = Path(asset.path)
@@ -434,3 +544,22 @@ def permanent_delete_asset(asset_id_value: str) -> dict:
         save_assets(area_key, [item for item in load_assets(area_key) if item.id != asset_id_value])
     append_history({"action": "permanent_delete", "from": asset.path})
     return {"ok": True}
+
+
+def copy_asset_to_target(asset_id_value: str) -> dict:
+    area, asset = find_asset(asset_id_value)
+    if area == "pending":
+        raise ValueError("Cannot copy from pending area")
+    if not asset.category:
+        raise ValueError("Asset has no category")
+    paths = get_category_paths_raw()
+    target_raw = (paths.get(area, {}).get(asset.type, {})).get(asset.category, "")
+    if not target_raw:
+        raise ValueError(f"No target path configured for category '{asset.category}'")
+    target_dir = Path(target_raw)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    source = Path(asset.path)
+    dest = target_dir / next_random_name(source, target_dir)
+    shutil.copy2(str(source), str(dest))
+    append_history({"action": "copy_to_target", "from": asset.path, "to": str(dest)})
+    return {"ok": True, "target": str(dest)}
