@@ -339,6 +339,23 @@ def move_from_pending(asset_id_value: str, target_area: str, category: str, sour
     return moved
 
 
+def move_to_pending(asset_id_value: str) -> Asset:
+    area, asset = find_asset(asset_id_value)
+    if area == "pending":
+        raise ValueError("Asset is already in pending.")
+    source = Path(asset.path)
+    target_path = pending_root() / next_numbered_name(source)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(target_path))
+    moved = build_asset(target_path, "pending", pending_root(), asset)
+    save_assets(area, [item for item in load_assets(area) if item.id != asset_id_value and item.id != moved.id])
+    pending_assets = [item for item in load_assets("pending") if item.id != moved.id]
+    pending_assets.append(moved)
+    save_assets("pending", sorted(pending_assets, key=lambda item: item.path))
+    append_history({"action": "delete", "from": asset.path, "to": moved.path})
+    return moved
+
+
 def append_history(item: dict) -> None:
     history = read_json(HISTORY_FILE, [])
     item["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -405,4 +422,15 @@ def rename_asset(asset_id_value: str, new_name: str) -> Asset:
 def open_folder(asset_id_value: str) -> dict:
     path = file_path_by_id(asset_id_value)
     os.startfile(path.parent)
+    return {"ok": True}
+
+
+def permanent_delete_asset(asset_id_value: str) -> dict:
+    _, asset = find_asset(asset_id_value)
+    path = Path(asset.path)
+    if path.exists():
+        path.unlink()
+    for area_key in INDEX_FILES:
+        save_assets(area_key, [item for item in load_assets(area_key) if item.id != asset_id_value])
+    append_history({"action": "permanent_delete", "from": asset.path})
     return {"ok": True}

@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import {
   createCategory,
   createProject,
+  deleteAsset,
   getAssets,
   getCategories,
   getProjects,
@@ -10,6 +11,7 @@ import {
   initAssets,
   moveAsset,
   openAssetFolder,
+  permanentDeleteAsset,
   renameAsset,
   saveSettings,
   scanAssets,
@@ -121,6 +123,24 @@ export const useAssetStore = defineStore('assets', () => {
     }
   }
 
+  async function deleteAssetById(assetId: string) {
+    const updated = await deleteAsset(assetId)
+    // Remove from current list (asset moved back to pending)
+    assets.value = assets.value.filter((asset) => asset.id !== assetId && asset.id !== updated.id)
+    if (selectedAssetId.value === assetId) {
+      selectedAssetId.value = assets.value[0]?.id ?? ''
+    }
+  }
+
+  async function permanentDeleteAssetById(assetId: string) {
+    await permanentDeleteAsset(assetId)
+    // Remove from current list (file physically deleted)
+    assets.value = assets.value.filter((asset) => asset.id !== assetId)
+    if (selectedAssetId.value === assetId) {
+      selectedAssetId.value = assets.value[0]?.id ?? ''
+    }
+  }
+
   return {
     settings,
     projects,
@@ -146,5 +166,7 @@ export const useAssetStore = defineStore('assets', () => {
     movePendingAsset,
     openFolder,
     renameAssetById,
+    deleteAssetById,
+    permanentDeleteAssetById,
   }
 })

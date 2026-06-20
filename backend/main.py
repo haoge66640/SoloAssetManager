@@ -8,6 +8,7 @@ from .models import (
     AssetQuery,
     AssetUpdateRequest,
     CategoryCreateRequest,
+    DeleteAssetRequest,
     MoveAssetRequest,
     ProjectCreateRequest,
     RenameAssetRequest,
@@ -23,7 +24,9 @@ from .storage import (
     list_categories,
     list_projects,
     move_from_pending,
+    move_to_pending,
     open_folder,
+    permanent_delete_asset,
     query_assets,
     rename_asset,
     save_settings,
@@ -132,6 +135,16 @@ def read_audio_info(asset_id: str):
 @app.post("/assets/rename")
 def rename_asset_endpoint(request: RenameAssetRequest):
     return rename_asset(request.asset_id, request.new_name)
+
+
+@app.post("/assets/delete")
+def delete_asset_endpoint(request: DeleteAssetRequest):
+    return move_to_pending(request.asset_id)
+
+
+@app.post("/assets/permanent-delete")
+def permanent_delete_asset_endpoint(request: DeleteAssetRequest):
+    return permanent_delete_asset(request.asset_id)
 
 
 @app.post("/assets/open-folder/{asset_id}")

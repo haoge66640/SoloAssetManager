@@ -63,6 +63,10 @@ class RenameAssetRequest(BaseModel):
     new_name: str
 
 
+class DeleteAssetRequest(BaseModel):
+    asset_id: str
+
+
 class AssetQuery(BaseModel):
     area: AssetArea | None = None
     type: AssetType | None = None

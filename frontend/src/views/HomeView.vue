@@ -249,6 +249,18 @@ async function openFolder() {
   await store.openFolder(selectedAsset.value.id)
 }
 
+async function deleteCurrentAsset() {
+  if (!selectedAsset.value) return
+  await store.deleteAssetById(selectedAsset.value.id)
+  message.success(t('deleted'))
+}
+
+async function permanentDeleteCurrentAsset() {
+  if (!selectedAsset.value) return
+  await store.permanentDeleteAssetById(selectedAsset.value.id)
+  message.success(t('fileDeleted'))
+}
+
 // ---- Rename helpers ----
 const isEditingName = ref(false)
 const editingNameValue = ref('')
@@ -550,7 +562,17 @@ onMounted(async () => {
 
         <aside class="detail-panel">
           <template v-if="selectedAsset">
-            <h2>{{ t('assetDetails') }}</h2>
+            <div class="detail-header">
+              <h2>{{ t('assetDetails') }}</h2>
+              <n-button size="tiny" quaternary class="header-open-btn" @click="openFolder">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                </template>
+                {{ t('openFolder') }}
+              </n-button>
+            </div>
             <div
               class="detail-preview"
               @click="requestPreviewPlay(selectedAsset.id, selectedAsset.type, 'detail')"
@@ -661,9 +683,19 @@ onMounted(async () => {
                     <n-button block @click="moveAsset('library')">{{ t('moveToLibrary') }}</n-button>
                   </div>
                 </section>
+                <n-button block type="error" @click="permanentDeleteCurrentAsset">
+                  {{ t('deleteFile') }}
+                </n-button>
               </template>
 
-              <n-button block @click="openFolder">{{ t('openFolder') }}</n-button>
+              <n-button
+                v-if="selectedAsset.area !== 'pending'"
+                block
+                type="warning"
+                @click="deleteCurrentAsset"
+              >
+                {{ t('deleteAsset') }}
+              </n-button>
             </n-space>
           </template>
 
@@ -1012,9 +1044,21 @@ onMounted(async () => {
 }
 
 .detail-panel h2 {
-  margin: 0 0 16px;
+  margin: 0;
   font-size: 18px;
   font-weight: 700;
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.header-open-btn {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .detail-preview {

@@ -75,6 +75,16 @@ export async function renameAsset(assetId: string, newName: string) {
   return response.data
 }
 
+export async function deleteAsset(assetId: string) {
+  const response = await api.post<Asset>('/assets/delete', { asset_id: assetId })
+  return response.data
+}
+
+export async function permanentDeleteAsset(assetId: string) {
+  const response = await api.post<{ ok: boolean }>('/assets/permanent-delete', { asset_id: assetId })
+  return response.data
+}
+
 export async function getAudioInfo(assetId: string) {
   const response = await api.get<{ duration: number; sampleRate: number; channels: number }>(`/assets/audio-info/${assetId}`)
   return response.data
