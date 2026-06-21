@@ -415,7 +415,15 @@ def move_from_pending(asset_id_value: str, target_area: str, category: str, sour
     base = current_project_root() if target_area == "project" else library_root()
     target_dir = base / TYPE_DIRS[asset.type] / category
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / next_random_name(source, target_dir)
+    target_path = target_dir / source.name
+    # Handle collision: append counter if name already exists
+    if target_path.exists():
+        stem = source.stem
+        ext = source.suffix.lower()
+        counter = 1
+        while (target_dir / f"{stem}_{counter}{ext}").exists() and counter < 100:
+            counter += 1
+        target_path = target_dir / f"{stem}_{counter}{ext}"
     shutil.move(str(source), str(target_path))
     moved = build_asset(target_path, target_area, base)
     moved.source_type = source_type

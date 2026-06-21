@@ -292,7 +292,7 @@ function stopOtherAudio(event: Event) {
   }
 }
 
-watch(() => [props.src, props.assetId], loadWaveform)
+watch(() => props.assetId, loadWaveform)
 watch(
   () => props.volume,
   (value) => {

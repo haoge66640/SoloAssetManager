@@ -98,6 +98,10 @@ export const useAssetStore = defineStore('assets', () => {
     loading.value = false
   }
 
+  async function refreshCurrent() {
+    await refreshAssets()
+  }
+
   async function scanAndRefresh() {
     await scanAssets('all')
     await refreshCategories()
@@ -113,6 +117,10 @@ export const useAssetStore = defineStore('assets', () => {
     await moveAsset(payload)
     await refreshCategories()
     await refreshAssets()
+    // Also refresh the target area's data so it's ready when user switches tabs
+    if (payload.target_area !== store.area) {
+      await getCategories(payload.target_area, store.assetType)
+    }
   }
 
   async function openFolder(assetId: string) {
@@ -126,6 +134,7 @@ export const useAssetStore = defineStore('assets', () => {
     if (selectedAssetId.value === assetId) {
       selectedAssetId.value = updated.id
     }
+    await refreshAssets()
   }
 
   async function deleteAssetById(assetId: string) {
@@ -153,6 +162,7 @@ export const useAssetStore = defineStore('assets', () => {
     if (selectedAssetId.value === assetId) {
       selectedAssetId.value = updated.id
     }
+    await refreshAssets()
   }
 
   async function refreshTags() {
@@ -190,6 +200,7 @@ export const useAssetStore = defineStore('assets', () => {
     refreshCategories,
     addCategory,
     refreshAssets,
+    refreshCurrent,
     scanAndRefresh,
     updateMeta,
     movePendingAsset,

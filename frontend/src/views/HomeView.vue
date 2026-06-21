@@ -26,6 +26,7 @@ import {
   ImageOutline,
   MusicalNotesOutline,
   PricetagOutline,
+  RefreshOutline,
   SettingsOutline,
   TimeOutline,
 } from '@vicons/ionicons5'
@@ -58,7 +59,7 @@ const newProjectName = ref('')
 const showNewProjectInput = ref(false)
 const newCategoryName = ref('')
 const metaForm = reactive({
-  source_type: '自制',
+  source_type: '',
   source_url: '',
   tags: [] as string[],
   note: '',
@@ -327,10 +328,12 @@ async function handleCreateCategory() {
   message.success(t('createdCategory'))
 }
 
-async function scanAssets() {
+async function scanAllAssets() {
   await store.scanAndRefresh()
   message.success(t('scanned'))
 }
+
+const moveCategoriesCache: { key: string; project: string[]; library: string[] } = { key: '', project: [], library: [] }
 
 async function refreshMoveCategories(asset = selectedAsset.value) {
   if (!asset || asset.area !== 'pending') {
@@ -338,8 +341,21 @@ async function refreshMoveCategories(asset = selectedAsset.value) {
     libraryMoveCategories.value = []
     return
   }
-  projectMoveCategories.value = await getCategories('project', asset.type)
-  libraryMoveCategories.value = await getCategories('library', asset.type)
+  const cacheKey = asset.type
+  if (moveCategoriesCache.key === cacheKey) {
+    projectMoveCategories.value = moveCategoriesCache.project
+    libraryMoveCategories.value = moveCategoriesCache.library
+    return
+  }
+  const [project, library] = await Promise.all([
+    getCategories('project', asset.type),
+    getCategories('library', asset.type),
+  ])
+  moveCategoriesCache.key = cacheKey
+  moveCategoriesCache.project = project
+  moveCategoriesCache.library = library
+  projectMoveCategories.value = project
+  libraryMoveCategories.value = library
   if (
     moveForm.category
     && !projectMoveCategories.value.includes(moveForm.category)
@@ -351,6 +367,14 @@ async function refreshMoveCategories(asset = selectedAsset.value) {
 
 async function moveAsset(targetArea: 'project' | 'library') {
   if (!selectedAsset.value) return
+  if (!metaForm.source_type) {
+    message.warning(t('selectSourceType'))
+    return
+  }
+  if (!moveForm.category) {
+    message.warning(t('selectCategory'))
+    return
+  }
   await store.movePendingAsset({
     asset_id: selectedAsset.value.id,
     target_area: targetArea,
@@ -403,7 +427,7 @@ const isSyncingMeta = ref(false)
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null
 
 function onSourceUrlChange(value: string) {
-  if (metaForm.source_type === '自制' && value.trim()) {
+  if (metaForm.source_type !== '网络' && value.trim()) {
     metaForm.source_type = '网络'
   }
 }
@@ -521,9 +545,6 @@ watch(
   (asset) => {
     isSyncingMeta.value = true
     metaForm.source_type = asset?.source_type ?? ''
-    if (!metaForm.source_type) {
-      metaForm.source_type = '自制'
-    }
     metaForm.source_url = asset?.source_url ?? ''
     metaForm.tags = asset?.tags ?? []
     metaForm.note = asset?.note ?? ''
@@ -709,11 +730,23 @@ onMounted(async () => {
             @keyup.enter="store.refreshAssets"
           />
           <n-button @click="store.refreshAssets">{{ t('search') }}</n-button>
-          <n-button type="primary" @click="scanAssets">{{ t('scanDirectory') }}</n-button>
+          <n-button @click="store.refreshCurrent">{{ t('refreshCurrent') }}</n-button>
         </template>
         <div v-else-if="activeSection === 'tags'" class="toolbar-title">{{ t('tagManagement') }}</div>
         <div v-else class="toolbar-title">{{ t('settings') }}</div>
         <div class="toolbar-controls">
+          <n-button
+            type="warning"
+            size="small"
+            secondary
+            @click="scanAllAssets"
+            :loading="store.loading"
+          >
+            <template #icon>
+              <n-icon size="16"><RefreshOutline /></n-icon>
+            </template>
+            {{ t('refreshAll') }}
+          </n-button>
           <div class="auto-play-control">
             <span>{{ t('autoPlay') }}</span>
             <n-switch v-model:value="autoPlayEnabled" size="small" />
@@ -1238,6 +1271,7 @@ onMounted(async () => {
                 :asset-id="selectedAsset.id"
                 :volume="audioVolume / 100"
                 :metadata="audioMetaOf(selectedAsset)"
+                :initial-peaks="waveformByKey[selectedAsset.id]"
                 :play-request="playRequestByKey[playRequestKey(selectedAsset.id, 'detail')] ?? 0"
                 @metadata="saveAudioInfo(selectedAsset.id, $event)"
               />
@@ -1258,13 +1292,13 @@ onMounted(async () => {
                 <section class="move-panel">
                   <h3>{{ t('organizeAsset') }}</h3>
                   <div class="move-category-row">
-                    <span>{{ t('subDirectory') }}</span>
+                    <span>{{ t('category') }}</span>
                     <n-select
                       v-model:value="moveForm.category"
                       filterable
                       tag
                       :options="moveCategoryOptions"
-                      :placeholder="t('subDirectory')"
+                      :placeholder="t('category')"
                     />
                   </div>
                   <div class="move-button-row">
