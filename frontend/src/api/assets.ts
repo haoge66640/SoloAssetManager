@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Asset, AssetArea, AssetMetaPayload, AssetType, MoveAssetPayload, Settings } from '@/types/asset'
+import type { Asset, AssetArea, AssetMetaPayload, AssetType, MoveAssetPayload, Settings, Tag, TagCategory } from '@/types/asset'
 
 export const api = axios.create({
   baseURL: 'http://127.0.0.1:8000',
@@ -101,6 +101,15 @@ export async function getWaveform(assetId: string, count?: number) {
   return response.data
 }
 
+export async function getWaveformBatch(assetIds: string[], count = 150) {
+  if (assetIds.length === 0) return {} as Record<string, number[]>
+  const response = await api.post<{ waveforms: Record<string, number[]> }>('/assets/waveform/batch', {
+    asset_ids: assetIds,
+    count,
+  })
+  return response.data.waveforms
+}
+
 export function assetFileUrl(assetId: string) {
   return `${api.defaults.baseURL}/assets/file/${assetId}`
 }
@@ -122,5 +131,30 @@ export async function deleteCategoryFromDisk(area: 'project' | 'library', type: 
 
 export async function copyAssetToTarget(assetId: string) {
   const response = await api.post<{ ok: boolean; target?: string }>(`/assets/copy-to-target/${assetId}`)
+  return response.data
+}
+
+export async function syncCategory(area: 'project' | 'library', type: AssetType, category: string) {
+  const response = await api.post<{ ok: boolean; copied: string[] }>('/categories/sync', { area, type, category })
+  return response.data
+}
+
+export async function importAssets() {
+  const response = await api.post<{ ok: boolean; imported: string[] }>('/assets/import')
+  return response.data
+}
+
+export async function getTags() {
+  const response = await api.get<Tag[]>('/tags')
+  return response.data
+}
+
+export async function createTag(category: TagCategory, name: string) {
+  const response = await api.post<Tag>('/tags', { category, name })
+  return response.data
+}
+
+export async function deleteTag(category: TagCategory, name: string) {
+  const response = await api.delete<{ ok: boolean }>('/tags', { data: { category, name } })
   return response.data
 }

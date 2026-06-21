@@ -6,11 +6,13 @@ from pydantic import BaseModel
 AssetArea = Literal["pending", "project", "library"]
 AssetType = Literal["image", "audio"]
 TargetArea = Literal["project", "library"]
+TagCategory = Literal["general", "audio", "image"]
 
 
 class Settings(BaseModel):
     owner_assets_path: str = ""
     current_project: str = ""
+    import_path: str = ""
 
 
 class Asset(BaseModel):
@@ -28,6 +30,10 @@ class Asset(BaseModel):
     source_url: str = ""
     tags: list[str] = []
     note: str = ""
+    # 音频元数据（扫描时预计算，避免每次请求启动 ffprobe）
+    duration: float = 0.0
+    sample_rate: int = 0
+    channels: int = 0
 
 
 class ProjectCreateRequest(BaseModel):
@@ -78,6 +84,11 @@ class AssetQuery(BaseModel):
     keyword: str = ""
 
 
+class WaveformBatchRequest(BaseModel):
+    asset_ids: list[str]
+    count: int = 150
+
+
 class CategoryPathRequest(BaseModel):
     area: TargetArea
     type: AssetType
@@ -88,4 +99,31 @@ class CategoryPathRequest(BaseModel):
 class DeleteCategoryRequest(BaseModel):
     area: TargetArea
     type: AssetType
+    name: str
+
+
+class SyncCategoryRequest(BaseModel):
+    area: TargetArea
+    type: AssetType
+    category: str
+
+
+class TagItem(BaseModel):
+    category: TagCategory
+    name: str
+
+
+class Tag(BaseModel):
+    category: TagCategory
+    name: str
+    count: int = 0
+
+
+class TagCreateRequest(BaseModel):
+    category: TagCategory
+    name: str
+
+
+class TagDeleteRequest(BaseModel):
+    category: TagCategory
     name: str

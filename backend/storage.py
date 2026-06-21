@@ -9,7 +9,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from .models import Asset, AssetType, Settings
+from .models import Asset, AssetType, Settings, TagCategory, TagItem
 
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -23,6 +23,7 @@ TAGS_FILE = DATA_DIR / "tags.json"
 SOURCES_FILE = DATA_DIR / "sources.json"
 HISTORY_FILE = DATA_DIR / "history.json"
 CATEGORY_PATHS_FILE = DATA_DIR / "category_paths.json"
+WAVEFORM_CACHE_FILE = DATA_DIR / "waveform_cache.json"
 
 TYPE_DIRS = {
     "image": "图片",
@@ -44,13 +45,15 @@ def ensure_data_files() -> None:
         if not file.exists():
             write_json(file, [])
     if not TAGS_FILE.exists():
-        write_json(TAGS_FILE, [])
+        write_json(TAGS_FILE, {"general": [], "audio": [], "image": []})
     if not SOURCES_FILE.exists():
         write_json(SOURCES_FILE, [])
     if not HISTORY_FILE.exists():
         write_json(HISTORY_FILE, [])
     if not CATEGORY_PATHS_FILE.exists():
         write_json(CATEGORY_PATHS_FILE, {})
+    if not WAVEFORM_CACHE_FILE.exists():
+        write_json(WAVEFORM_CACHE_FILE, {})
 
 
 def read_json(path: Path, default):
@@ -212,13 +215,37 @@ def index_file(area: str) -> Path:
     return INDEX_FILES[area]
 
 
-def load_assets(area: str) -> list[Asset]:
+# ---- 内存缓存 ----
+# 本地服务场景下，避免每次请求都读取并解析 3 个 JSON 文件。
+_assets_cache: dict[str, list[Asset]] = {}          # area -> assets
+_asset_index: dict[str, tuple[str, Asset]] = {}     # id -> (area, asset)
+
+
+def invalidate_cache() -> None:
+    """写操作后调用，清空缓存以便下次读取时重建。"""
+    _assets_cache.clear()
+    _asset_index.clear()
+
+
+def _ensure_cache() -> None:
+    if _assets_cache:
+        return
     ensure_data_files()
-    return [Asset(**item) for item in read_json(index_file(area), [])]
+    for area in INDEX_FILES:
+        assets = [Asset(**item) for item in read_json(index_file(area), [])]
+        _assets_cache[area] = assets
+        for asset in assets:
+            _asset_index[asset.id] = (area, asset)
+
+
+def load_assets(area: str) -> list[Asset]:
+    _ensure_cache()
+    return _assets_cache.get(area, [])
 
 
 def save_assets(area: str, assets: list[Asset]) -> None:
     write_json(index_file(area), [asset.model_dump() for asset in assets])
+    invalidate_cache()
 
 
 def metadata_by_path(area: str) -> dict[str, Asset]:
@@ -239,6 +266,19 @@ def build_asset(path: Path, area: str, base: Path, old: Asset | None = None) -> 
         parent = path.parent
         if parent != type_root:
             category = parent.relative_to(type_root).parts[0]
+    # 音频元数据：优先复用已扫描的元数据，避免重复启动 ffprobe
+    duration = old.duration if old and old.duration > 0 else 0.0
+    sample_rate = old.sample_rate if old and old.sample_rate > 0 else 0
+    channels = old.channels if old and old.channels > 0 else 0
+    if asset_type == "audio" and duration == 0.0:
+        try:
+            info = probe_audio_info(path)
+            duration = info["duration"]
+            sample_rate = info["sampleRate"]
+            channels = info["channels"]
+        except Exception:
+            pass
+
     return Asset(
         id=asset_id(path),
         area=area,
@@ -254,6 +294,9 @@ def build_asset(path: Path, area: str, base: Path, old: Asset | None = None) -> 
         source_url=old.source_url if old else "",
         tags=old.tags if old else [],
         note=old.note if old else "",
+        duration=duration,
+        sample_rate=sample_rate,
+        channels=channels,
     )
 
 
@@ -266,7 +309,7 @@ def scan_pending() -> list[Asset]:
             if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 assets.append(build_asset(path, "pending", root, old_assets.get(normalized(path))))
             if path.is_dir():
-                for child in sorted(path.iterdir()):
+                for child in sorted(path.rglob("*")):
                     if child.is_file() and child.suffix.lower() in SUPPORTED_EXTENSIONS:
                         assets.append(build_asset(child, "pending", root, old_assets.get(normalized(child))))
     save_assets("pending", assets)
@@ -296,16 +339,19 @@ def scan_all() -> dict[str, list[Asset]]:
 
 
 def list_all_assets() -> list[Asset]:
+    _ensure_cache()
     assets: list[Asset] = []
     for area in INDEX_FILES:
-        assets.extend(load_assets(area))
+        assets.extend(_assets_cache.get(area, []))
     return assets
 
 
 def query_assets(area: str | None, asset_type: str | None, category: str, keyword: str) -> list[Asset]:
-    assets = list_all_assets()
+    _ensure_cache()
     if area:
-        assets = [asset for asset in assets if asset.area == area]
+        assets = list(_assets_cache.get(area, []))
+    else:
+        assets = list_all_assets()
     if asset_type:
         assets = [asset for asset in assets if asset.type == asset_type]
     if category:
@@ -324,10 +370,9 @@ def query_assets(area: str | None, asset_type: str | None, category: str, keywor
 
 
 def find_asset(asset_id_value: str) -> tuple[str, Asset]:
-    for area in INDEX_FILES:
-        for asset in load_assets(area):
-            if asset.id == asset_id_value:
-                return area, asset
+    _ensure_cache()
+    if asset_id_value in _asset_index:
+        return _asset_index[asset_id_value]
     raise FileNotFoundError(asset_id_value)
 
 
@@ -414,8 +459,8 @@ def file_path_by_id(asset_id_value: str) -> Path:
     return Path(asset.path)
 
 
-def audio_info(asset_id_value: str) -> dict:
-    path = file_path_by_id(asset_id_value)
+def probe_audio_info(path: Path) -> dict:
+    """通过 ffprobe 探测音频文件的元数据。"""
     output = subprocess.check_output(
         [
             "ffprobe",
@@ -441,8 +486,36 @@ def audio_info(asset_id_value: str) -> dict:
     }
 
 
+def audio_info(asset_id_value: str) -> dict:
+    area, asset = find_asset(asset_id_value)
+    # 优先返回扫描时预计算的元数据，避免每次请求都启动 ffprobe
+    if asset.duration > 0 or asset.sample_rate > 0 or asset.channels > 0:
+        return {
+            "duration": asset.duration,
+            "sampleRate": asset.sample_rate,
+            "channels": asset.channels,
+        }
+    return probe_audio_info(Path(asset.path))
+
+
 _waveform_cache: dict[str, tuple[list[int], int]] = {}
 _WAVEFORM_CACHE_MAX = 100
+# 持久化的波形峰值缓存：{ "asset_id:count": [peaks...] }
+_waveform_peaks_persist: dict[str, list[float]] = {}
+_waveform_persist_loaded = False
+
+
+def _ensure_waveform_persist() -> None:
+    global _waveform_persist_loaded
+    if _waveform_persist_loaded:
+        return
+    ensure_data_files()
+    _waveform_peaks_persist.update(read_json(WAVEFORM_CACHE_FILE, {}))
+    _waveform_persist_loaded = True
+
+
+def _save_waveform_persist() -> None:
+    write_json(WAVEFORM_CACHE_FILE, _waveform_peaks_persist)
 
 
 def _get_cached_samples(asset_id_value: str) -> list[int]:
@@ -467,15 +540,25 @@ def _get_cached_samples(asset_id_value: str) -> list[int]:
 
 def compute_waveform(asset_id_value: str, count: int = 600) -> dict:
     count = max(20, min(2000, count))
+    # 1) 优先命中持久化的峰值缓存（二次访问同一音频时无需启动 ffmpeg）
+    _ensure_waveform_persist()
+    cache_key = f"{asset_id_value}:{count}"
+    if cache_key in _waveform_peaks_persist:
+        return {"peaks": _waveform_peaks_persist[cache_key]}
+
+    # 2) 否则解码 PCM 样本并计算峰值
     samples = _get_cached_samples(asset_id_value)
     samples_per_bar = max(1, len(samples) // count)
-    peaks = []
+    peaks: list[float] = []
     for i in range(count):
         start = i * samples_per_bar
         end = len(samples) if i == count - 1 else start + samples_per_bar
         segment = samples[start:end]
         peak = max(abs(s) for s in segment) / 32768.0 if segment else 0
         peaks.append(round(peak, 4))
+
+    _waveform_peaks_persist[cache_key] = peaks
+    _save_waveform_persist()
     return {"peaks": peaks}
 
 
@@ -546,6 +629,33 @@ def permanent_delete_asset(asset_id_value: str) -> dict:
     return {"ok": True}
 
 
+IMPORT_EXTENSIONS: set[str] = {".png", ".svg", ".wav", ".ogg"}
+
+
+def import_from_path() -> dict:
+    settings = get_settings()
+    import_raw = settings.import_path
+    if not import_raw:
+        raise ValueError("Import path is not configured")
+    source_dir = Path(import_raw)
+    if not source_dir.exists() or not source_dir.is_dir():
+        raise ValueError(f"Import path does not exist: {import_raw}")
+    pending = pending_root()
+    imported: list[str] = []
+    for f in sorted(source_dir.iterdir()):
+        if f.is_file() and f.suffix.lower() in IMPORT_EXTENSIONS:
+            dest = pending / f.name
+            # Name collision: use random 6-digit prefix
+            if dest.exists():
+                prefix = f"{random.randint(100000, 999999)}"
+                dest = pending / f"{prefix}{f.suffix.lower()}"
+            shutil.move(str(f), str(dest))
+            imported.append(dest.name)
+    if imported:
+        append_history({"action": "import", "from": import_raw, "moved": imported})
+    return {"ok": True, "imported": imported}
+
+
 def copy_asset_to_target(asset_id_value: str) -> dict:
     area, asset = find_asset(asset_id_value)
     if area == "pending":
@@ -563,3 +673,129 @@ def copy_asset_to_target(asset_id_value: str) -> dict:
     shutil.copy2(str(source), str(dest))
     append_history({"action": "copy_to_target", "from": asset.path, "to": str(dest)})
     return {"ok": True, "target": str(dest)}
+
+
+SYNC_EXTENSIONS: dict[str, set[str]] = {
+    "image": {".png", ".svg"},
+    "audio": {".wav", ".ogg"},
+}
+
+
+def sync_category(area: str, asset_type: AssetType, category: str) -> dict:
+    base = current_project_root() if area == "project" else library_root()
+    source_dir = base / type_dir(asset_type) / category
+    if not source_dir.exists() or not source_dir.is_dir():
+        raise ValueError(f"Source category directory not found: {source_dir}")
+
+    paths = get_category_paths_raw()
+    target_raw = (paths.get(area, {}).get(asset_type, {})).get(category, "")
+    if not target_raw:
+        raise ValueError(f"No target path configured for category '{category}'")
+    target_dir = Path(target_raw)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    valid_exts = SYNC_EXTENSIONS.get(asset_type, set())
+
+    # Collect files by name (strip extension) from source
+    source_files: dict[str, Path] = {}
+    for f in source_dir.iterdir():
+        if f.is_file() and f.suffix.lower() in valid_exts:
+            source_files[f.stem] = f
+
+    # Collect files by name from target
+    target_files: dict[str, Path] = {}
+    for f in target_dir.iterdir():
+        if f.is_file() and f.suffix.lower() in valid_exts:
+            target_files[f.stem] = f
+
+    copied: list[str] = []
+    source_names = set(source_files.keys())
+    target_names = set(target_files.keys())
+
+    # Copy from source → target (files only in source)
+    for name in source_names - target_names:
+        src = source_files[name]
+        ext = src.suffix.lower()
+        dest = target_dir / f"{name}{ext}"
+        if not dest.exists():
+            shutil.copy2(str(src), str(dest))
+            copied.append(f"source→target: {src.name}")
+
+    # Copy from target → source (files only in target)
+    for name in target_names - source_names:
+        src = target_files[name]
+        ext = src.suffix.lower()
+        dest = source_dir / f"{name}{ext}"
+        if not dest.exists():
+            shutil.copy2(str(src), str(dest))
+            copied.append(f"target→source: {src.name}")
+
+    append_history({
+        "action": "sync_category",
+        "area": area,
+        "type": asset_type,
+        "category": category,
+        "copied": copied,
+    })
+
+    return {"ok": True, "copied": copied}
+
+
+# ---- 标签管理 ----
+
+def _read_tag_catalog() -> dict[str, list[str]]:
+    """读取标签目录，返回 {category: [name, ...]}"""
+    ensure_data_files()
+    data = read_json(TAGS_FILE, {"general": [], "audio": [], "image": []})
+    # 兼容旧格式：如果 data 是 list，转换为新格式
+    if isinstance(data, list):
+        data = {"general": data, "audio": [], "image": []}
+        write_json(TAGS_FILE, data)
+    return data
+
+
+def _write_tag_catalog(catalog: dict[str, list[str]]) -> None:
+    write_json(TAGS_FILE, catalog)
+
+
+def list_tags() -> list[dict]:
+    """返回所有标签及其使用计数。"""
+    catalog = _read_tag_catalog()
+    # 计算每个标签被多少资产使用
+    _ensure_cache()
+    tag_counts: dict[str, int] = {}
+    for area in INDEX_FILES:
+        for asset in _assets_cache.get(area, []):
+            for tag in asset.tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    result = []
+    for cat_key in ("general", "audio", "image"):
+        for name in catalog.get(cat_key, []):
+            result.append({
+                "category": cat_key,
+                "name": name,
+                "count": tag_counts.get(name, 0),
+            })
+    return result
+
+
+def add_tag(category: TagCategory, name: str) -> dict:
+    """添加标签到目录。"""
+    catalog = _read_tag_catalog()
+    names = catalog.setdefault(category, [])
+    if name in names:
+        raise ValueError(f"Tag '{name}' already exists in '{category}'")
+    names.append(name)
+    _write_tag_catalog(catalog)
+    return {"category": category, "name": name, "count": 0}
+
+
+def remove_tag(category: TagCategory, name: str) -> dict:
+    """从目录中删除标签。"""
+    catalog = _read_tag_catalog()
+    names = catalog.get(category, [])
+    if name not in names:
+        raise ValueError(f"Tag '{name}' not found in '{category}'")
+    names.remove(name)
+    _write_tag_catalog(catalog)
+    return {"ok": True}

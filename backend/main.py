@@ -16,6 +16,10 @@ from .models import (
     ProjectCreateRequest,
     RenameAssetRequest,
     Settings,
+    SyncCategoryRequest,
+    TagCreateRequest,
+    TagDeleteRequest,
+    WaveformBatchRequest,
 )
 from .storage import (
     audio_info,
@@ -28,9 +32,13 @@ from .storage import (
     format_with_ffmpeg,
     get_category_paths,
     get_settings,
+    import_from_path,
     init_owner_assets,
     list_categories,
     list_projects,
+    list_tags,
+    add_tag,
+    remove_tag,
     move_from_pending,
     move_to_pending,
     open_folder,
@@ -42,6 +50,7 @@ from .storage import (
     scan_area,
     scan_pending,
     set_category_target_path,
+    sync_category,
     update_asset_meta,
 )
 
@@ -163,6 +172,18 @@ def read_waveform(asset_id: str, count: int = 600):
     return compute_waveform(asset_id, count)
 
 
+@app.post("/assets/waveform/batch")
+def read_waveform_batch(request: WaveformBatchRequest):
+    """批量获取多个音频的波形峰值，把一页 N 个请求合并为 1 个。"""
+    waveforms: dict[str, list[float]] = {}
+    for asset_id in request.asset_ids:
+        try:
+            waveforms[asset_id] = compute_waveform(asset_id, request.count)["peaks"]
+        except Exception:
+            waveforms[asset_id] = []
+    return {"waveforms": waveforms}
+
+
 @app.post("/assets/rename")
 def rename_asset_endpoint(request: RenameAssetRequest):
     return rename_asset(request.asset_id, request.new_name)
@@ -191,3 +212,28 @@ def open_asset_folder(asset_id: str):
 @app.post("/assets/copy-to-target/{asset_id}")
 def copy_to_target(asset_id: str):
     return copy_asset_to_target(asset_id)
+
+
+@app.post("/categories/sync")
+def sync(request: SyncCategoryRequest):
+    return sync_category(request.area, request.type, request.category)
+
+
+@app.post("/assets/import")
+def import_assets():
+    return import_from_path()
+
+
+@app.get("/tags")
+def read_tags():
+    return list_tags()
+
+
+@app.post("/tags")
+def create_tag(request: TagCreateRequest):
+    return add_tag(request.category, request.name)
+
+
+@app.delete("/tags")
+def delete_tag(request: TagDeleteRequest):
+    return remove_tag(request.category, request.name)

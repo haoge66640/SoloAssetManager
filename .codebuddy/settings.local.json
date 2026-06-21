@@ -1,0 +1,10 @@
+{
+  "enabledPlugins": {
+    "frontend-design@codebuddy-plugins-official": true,
+    "backend-development@codebuddy-plugins-official": true,
+    "web-artifacts-builder@codebuddy-plugins-official": true,
+    "pyright-lsp@codebuddy-plugins-official": true,
+    "typescript-lsp@codebuddy-plugins-official": true,
+    "javascript-typescript@codebuddy-plugins-official": true
+  }
+}

@@ -3,12 +3,15 @@ import { defineStore } from 'pinia'
 import {
   createCategory,
   createProject,
+  createTag,
   deleteAsset,
+  deleteTag,
   formatAsset,
   getAssets,
   getCategories,
   getProjects,
   getSettings,
+  getTags,
   initAssets,
   moveAsset,
   openAssetFolder,
@@ -18,10 +21,10 @@ import {
   scanAssets,
   updateAssetMeta,
 } from '@/api/assets'
-import type { Asset, AssetArea, AssetMetaPayload, AssetType, MoveAssetPayload, Settings } from '@/types/asset'
+import type { Asset, AssetArea, AssetMetaPayload, AssetType, MoveAssetPayload, Settings, Tag, TagCategory } from '@/types/asset'
 
 export const useAssetStore = defineStore('assets', () => {
-  const settings = ref<Settings>({ owner_assets_path: '', current_project: '' })
+  const settings = ref<Settings>({ owner_assets_path: '', current_project: '', import_path: '' })
   const projects = ref<string[]>([])
   const categories = ref<string[]>([])
   const assets = ref<Asset[]>([])
@@ -31,6 +34,7 @@ export const useAssetStore = defineStore('assets', () => {
   const category = ref('')
   const keyword = ref('')
   const loading = ref(false)
+  const tags = ref<Tag[]>([])
 
   const selectedAsset = computed(() => assets.value.find((asset) => asset.id === selectedAssetId.value))
 
@@ -151,6 +155,20 @@ export const useAssetStore = defineStore('assets', () => {
     }
   }
 
+  async function refreshTags() {
+    tags.value = await getTags()
+  }
+
+  async function addTag(category: TagCategory, name: string) {
+    await createTag(category, name)
+    await refreshTags()
+  }
+
+  async function removeTagById(category: TagCategory, name: string) {
+    await deleteTag(category, name)
+    await refreshTags()
+  }
+
   return {
     settings,
     projects,
@@ -163,6 +181,7 @@ export const useAssetStore = defineStore('assets', () => {
     category,
     keyword,
     loading,
+    tags,
     loadSettings,
     persistSettings,
     initializeOwnerAssets,
@@ -179,5 +198,8 @@ export const useAssetStore = defineStore('assets', () => {
     deleteAssetById,
     permanentDeleteAssetById,
     formatAssetById,
+    refreshTags,
+    addTag,
+    removeTagById,
   }
 })

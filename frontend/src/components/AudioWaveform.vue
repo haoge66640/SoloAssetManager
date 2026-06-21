@@ -11,6 +11,12 @@ const props = defineProps<{
   compact?: boolean
   playRequest?: number
   volume: number
+  /** 预计算的音频元数据（后端扫描时已存入 Asset），命中时不再请求 /assets/audio-info */
+  metadata?: { duration: number; sampleRate: number; channels?: number }
+  /** 懒加载：元素进入视口附近时才请求波形，减少切换分类时的并发请求 */
+  lazy?: boolean
+  /** 批量预取的波形峰值，命中时直接绘制，不再请求 /assets/waveform/{id} */
+  initialPeaks?: number[]
 }>()
 const emit = defineEmits<{
   metadata: [value: { duration: number; sampleRate: number; channels?: number }]
@@ -18,6 +24,7 @@ const emit = defineEmits<{
 
 const canvas = ref<HTMLCanvasElement>()
 const canvasContainer = ref<HTMLDivElement>()
+const rootRef = ref<HTMLDivElement>()
 const audio = ref<HTMLAudioElement>()
 const isPlaying = ref(false)
 const isLoading = ref(true)
@@ -25,6 +32,7 @@ const isPlayable = ref(false)
 const instanceToken = Symbol('audio-waveform')
 let loadVersion = 0
 let resizeObserver: ResizeObserver | null = null
+let lazyObserver: IntersectionObserver | null = null
 const loadedPeaks = ref<number[]>([])
 
 function getCanvasWidth(): number {
@@ -47,7 +55,7 @@ function drawFilledWaveform(peaks: number[]) {
   if (!target || peaks.length === 0) return
 
   const width = getCanvasWidth()
-  const height = props.compact ? 96 : 180
+  const height = props.compact ? 96 : 64
   const ratio = window.devicePixelRatio || 1
   const ctx = target.getContext('2d')
   if (!ctx) return
@@ -70,14 +78,14 @@ function drawFilledWaveform(peaks: number[]) {
   // Top envelope (left to right)
   for (let i = 0; i < len; i++) {
     const x = (i / Math.max(1, len - 1)) * width
-    const y = center - peaks[i] * halfH
+    const y = center - (peaks[i] ?? 0) * halfH
     ctx.lineTo(x, y)
   }
 
   // Bottom envelope (right to left)
   for (let i = len - 1; i >= 0; i--) {
     const x = (i / Math.max(1, len - 1)) * width
-    const y = center + peaks[i] * halfH
+    const y = center + (peaks[i] ?? 0) * halfH
     ctx.lineTo(x, y)
   }
 
@@ -85,10 +93,10 @@ function drawFilledWaveform(peaks: number[]) {
 
   // Gradient fill
   const gradient = ctx.createLinearGradient(0, 0, 0, height)
-  gradient.addColorStop(0, '#818cf8')   // indigo-400
-  gradient.addColorStop(0.3, '#6366f1') // indigo-500
-  gradient.addColorStop(0.7, '#6366f1') // indigo-500
-  gradient.addColorStop(1, '#818cf8')   // indigo-400
+  gradient.addColorStop(0, '#5eead4')   // teal-300
+  gradient.addColorStop(0.3, '#2dd4bf') // teal-400
+  gradient.addColorStop(0.7, '#2dd4bf') // teal-400
+  gradient.addColorStop(1, '#5eead4')   // teal-300
 
   ctx.fillStyle = gradient
   ctx.fill()
@@ -97,7 +105,7 @@ function drawFilledWaveform(peaks: number[]) {
   ctx.beginPath()
   ctx.moveTo(0, center)
   ctx.lineTo(width, center)
-  ctx.strokeStyle = 'rgba(99, 102, 241, 0.15)'
+  ctx.strokeStyle = 'rgba(45, 212, 191, 0.15)'
   ctx.lineWidth = 1
   ctx.stroke()
 }
@@ -131,13 +139,30 @@ async function loadWaveform() {
 
   try {
     if (props.assetId) {
-      getAudioInfo(props.assetId)
-        .then((metadata) => {
-          if (currentVersion === loadVersion) {
-            emit('metadata', metadata)
-          }
-        })
-        .catch(() => undefined)
+      // 优先使用预计算的元数据，避免额外请求 /assets/audio-info
+      if (props.metadata && (props.metadata.duration || props.metadata.sampleRate || props.metadata.channels)) {
+        if (currentVersion === loadVersion) {
+          emit('metadata', props.metadata)
+        }
+      } else {
+        getAudioInfo(props.assetId)
+          .then((metadata) => {
+            if (currentVersion === loadVersion) {
+              emit('metadata', metadata)
+            }
+          })
+          .catch(() => undefined)
+      }
+
+      // 优先使用批量预取的波形峰值，避免单独请求 /assets/waveform/{id}
+      if (props.initialPeaks && props.initialPeaks.length > 0) {
+        if (currentVersion === loadVersion) {
+          loadedPeaks.value = props.initialPeaks
+          drawFilledWaveform(props.initialPeaks)
+          isLoading.value = false
+          return
+        }
+      }
 
       // Fetch waveform peaks from backend with dynamic count
       try {
@@ -284,6 +309,19 @@ watch(
     }
   },
 )
+
+watch(
+  () => props.initialPeaks,
+  (peaks) => {
+    // 批量预取结果到达时，若尚未加载波形则立即绘制，并使进行中的单独请求失效
+    if (peaks && peaks.length > 0 && loadedPeaks.value.length === 0) {
+      loadVersion += 1
+      loadedPeaks.value = peaks
+      drawFilledWaveform(peaks)
+      isLoading.value = false
+    }
+  },
+)
 onMounted(() => {
   window.addEventListener('solo-audio-play', stopOtherAudio)
   if (audio.value) {
@@ -295,18 +333,44 @@ onMounted(() => {
   if (canvasContainer.value) {
     resizeObserver.observe(canvasContainer.value)
   }
-  loadWaveform()
+  if (props.lazy) {
+    // 懒加载：卡片进入视口附近时才请求波形，减少切换分类时的并发请求
+    const rootEl = rootRef.value
+    if (rootEl && typeof IntersectionObserver !== 'undefined') {
+      let triggered = false
+      lazyObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting && !triggered) {
+              triggered = true
+              loadWaveform()
+              lazyObserver?.disconnect()
+              lazyObserver = null
+            }
+          }
+        },
+        { rootMargin: '300px' },
+      )
+      lazyObserver.observe(rootEl)
+    } else {
+      loadWaveform()
+    }
+  } else {
+    loadWaveform()
+  }
 })
 onBeforeUnmount(() => {
   window.removeEventListener('solo-audio-play', stopOtherAudio)
   resizeObserver?.disconnect()
   resizeObserver = null
+  lazyObserver?.disconnect()
+  lazyObserver = null
   stopAudio()
 })
 </script>
 
 <template>
-  <div class="waveform" :class="{ compact }">
+  <div ref="rootRef" class="waveform" :class="{ compact }">
     <button class="play-dot" :class="{ loading: isLoading && !isPlaying, pending: !isPlayable }" type="button" @click="togglePlay">
       <span v-if="isLoading && !isPlaying" class="loading-icon"></span>
       <span v-else-if="!isPlaying" class="play-icon"></span>
@@ -317,7 +381,7 @@ onBeforeUnmount(() => {
     </div>
     <audio
       ref="audio"
-      preload="auto"
+      preload="none"
       :src="src"
       @canplay="markPlayable"
       @loadstart="markLoading"
@@ -334,10 +398,10 @@ onBeforeUnmount(() => {
   gap: 16px;
   align-items: center;
   width: 100%;
-  min-height: 180px;
-  padding: 18px;
-  border-radius: 8px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  min-height: auto;
+  padding: 10px;
+  border-radius: 10px;
+  background: transparent;
 }
 
 .waveform.compact {
@@ -359,9 +423,15 @@ onBeforeUnmount(() => {
   place-items: center;
   border: 0;
   border-radius: 50%;
-  background: #5b5fc7;
-  box-shadow: 0 10px 24px rgba(91, 95, 199, 0.24);
+  background: linear-gradient(140deg, #f5a524 0%, #d97706 100%);
+  box-shadow: 0 8px 22px rgba(245, 165, 36, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.3);
   cursor: pointer;
+  transition: transform 0.18s, box-shadow 0.18s;
+}
+
+.play-dot:hover {
+  transform: scale(1.06);
+  box-shadow: 0 10px 26px rgba(245, 165, 36, 0.46), inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .play-dot.loading,
@@ -372,6 +442,7 @@ onBeforeUnmount(() => {
 .compact .play-dot {
   width: 36px;
   height: 36px;
+  box-shadow: 0 6px 16px rgba(245, 165, 36, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .play-icon {
@@ -380,7 +451,7 @@ onBeforeUnmount(() => {
   margin-left: 4px;
   border-top: 9px solid transparent;
   border-bottom: 9px solid transparent;
-  border-left: 14px solid #fff;
+  border-left: 14px solid #1a1206;
 }
 
 .compact .play-icon {
@@ -392,8 +463,8 @@ onBeforeUnmount(() => {
 .pause-icon {
   width: 16px;
   height: 18px;
-  border-right: 5px solid #fff;
-  border-left: 5px solid #fff;
+  border-right: 5px solid #1a1206;
+  border-left: 5px solid #1a1206;
 }
 
 .compact .pause-icon {
@@ -406,8 +477,8 @@ onBeforeUnmount(() => {
 .loading-icon {
   width: 18px;
   height: 18px;
-  border: 3px solid rgba(255, 255, 255, 0.36);
-  border-top-color: #fff;
+  border: 3px solid rgba(26, 18, 6, 0.3);
+  border-top-color: #1a1206;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
